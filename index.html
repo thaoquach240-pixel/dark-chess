@@ -3,768 +3,513 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>賢哥的暗棋</title>
+    <title>賢哥的暗棋 - 斬首進化版</title>
     
-    <!-- Tailwind CSS (Browser Runtime) -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- React & ReactDOM (UMD Build) -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    
-    <!-- Babel (For in-browser JSX transpilation) -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <style>
         body { font-family: "Noto Serif TC", serif; margin: 0; background-color: #1c1917; overflow: hidden; touch-action: manipulation; }
         @keyframes confetti { 0% { transform: translateY(-100%) rotate(0deg); opacity: 1; } 100% { transform: translateY(100vh) rotate(720deg); opacity: 0; } }
         .confetti { position: absolute; width: 10px; height: 10px; background: gold; animation: confetti 3s linear infinite; z-index: 110; pointer-events: none; }
-        .animate-fade-in { animation: fade-in 0.3s ease-out forwards; }
+        .animate-fade-in { animation: fade-in 0.1s ease-out forwards; }
         @keyframes fade-in { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
-        @keyframes zoom-in-bounce { 0% { transform: scale(0); } 50% { transform: scale(1.2); } 100% { transform: scale(1); } }
+        .game-board { border: 4px solid black !important; }
+        .game-cell { border: 2px solid black !important; box-sizing: border-box; }
+        @keyframes flash-toast { 
+            0% { opacity: 0; transform: translate(-50%, -50%) scale(0.8); } 
+            10% { opacity: 1; transform: translate(-50%, -50%) scale(1.1); } 
+            90% { opacity: 1; transform: translate(-50%, -50%) scale(1); } 
+            100% { opacity: 0; transform: translate(-50%, -50%) scale(1.2); } 
+        }
+        .animate-flash-toast { animation: flash-toast 0.4s ease-out forwards; }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
+    <script id="worker-code" type="javascript/worker">
+        // 提高核心棋子的價值，讓 AI 更執著於獵殺
+        const VAL_MAP = { 7: 15000, 6: 4000, 5: 3500, 4: 2800, 3: 1800, 2: 5000, 1: 1000 };
+        let isTimeout = false;
+        let nodeCount = 0;
+
+        function getObstacleCount(f, t, b) {
+            const r1 = Math.floor(f / 4), c1 = f % 4, r2 = Math.floor(t / 4), c2 = t % 4;
+            let cnt = 0;
+            if (r1 === r2) { for (let c = Math.min(c1, c2) + 1; c < Math.max(c1, c2); c++) if (b[r1 * 4 + c] !== 0) cnt++; }
+            else if (c1 === c2) { for (let r = Math.min(r1, r2) + 1; r < Math.max(r1, r2); r++) if (b[r * 4 + c1] !== 0) cnt++; }
+            else return -1;
+            return cnt;
+        }
+
+        function isValid(f, t, b) {
+            const pf = b[f], pt = b[t];
+            if (pf === 0 || Math.abs(pf) > 100) return false;
+            if (Math.abs(pt) > 100) return false;
+            if (pt !== 0 && (pf > 0) === (pt > 0)) return false;
+            const dist = Math.abs(Math.floor(f/4)-Math.floor(t/4)) + Math.abs((f%4)-(t%4));
+            const af = Math.abs(pf), at = Math.abs(pt);
+            if (af === 2) return (Math.floor(f/4)===Math.floor(t/4)||f%4===t%4) ? (pt !== 0 ? getObstacleCount(f,t,b) === 1 : dist === 1) : false;
+            if (dist !== 1) return false;
+            if (pt === 0) return true;
+            return af === 1 ? (at === 7 || at === 1) : (af === 7 ? at !== 1 : af >= at);
+        }
+
+        function evaluate(b, isRed) {
+            let s = 0, aiP = [], opP = [];
+            let aiTotalVal = 0, opTotalVal = 0;
+            for(let i=0; i<32; i++) {
+                const v = b[i]; if(v===0) continue;
+                const rv = Math.abs(v) > 100 ? (v>0 ? v-100 : v+100) : v;
+                const isPieceAi = (isRed && rv > 0) || (!isRed && rv < 0);
+                const val = VAL_MAP[Math.abs(rv)] || 0;
+                if(isPieceAi) { aiP.push(i); aiTotalVal += val; } 
+                else { opP.push(i); opTotalVal += val; }
+            }
+            if (opP.length === 0) return 9999999;
+            if (aiP.length === 0) return -9999999;
+            
+            s += (aiTotalVal - opTotalVal);
+
+            // 斬首行動：當敵方大棋（將、士、象、炮）存在時，強烈吸引 AI 靠近
+            for(let i of opP) {
+                const rv = Math.abs(b[i]) > 100 ? (b[i]>0 ? b[i]-100 : b[i]+100) : b[i];
+                const rank = Math.abs(rv);
+                let r = Math.floor(i/4), c = i%4;
+                
+                // 敵方大棋越靠近棋盤中心越危險，強迫 AI 獵殺
+                if ([7, 6, 5, 2].includes(rank)) {
+                    s += (Math.pow(Math.abs(r-3.5), 2) + Math.pow(Math.abs(c-1.5), 2)) * 150;
+                } else {
+                    s += (Math.pow(Math.abs(r-3.5), 2) + Math.pow(Math.abs(c-1.5), 2)) * 50;
+                }
+            }
+            return s;
+        }
+
+        function generate(b, color, isAi, actualAiColor) {
+            const m = [];
+            for(let i=0; i<32; i++){
+                const v = b[i]; if(v===0) continue;
+                const isMine = (color && v > 0) || (!color && v < 0);
+                if (Math.abs(v) > 100) {
+                    const rv = v > 0 ? v-100 : v+100;
+                    let fs = 0;
+                    if(color === actualAiColor) {
+                        const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+                        for(let [dr,dc] of dirs) {
+                            const nr=Math.floor(i/4)+dr, nc=i%4+dc;
+                            if(nr>=0 && nr<8 && nc>=0 && nc<4) {
+                                const nv = b[nr*4+nc];
+                                if(nv!==0) {
+                                    const nrv = Math.abs(nv)>100 ? (nv>0?nv-100:nv+100) : nv;
+                                    if(color !== (nrv>0)) {
+                                        // 斬首翻牌邏輯：看到大棋就翻開，權重拉到最高
+                                        if (Math.abs(rv) === 7) fs += 5000000;
+                                        if ([6, 5, 2].includes(Math.abs(rv))) fs += 2000000;
+                                        if (Math.abs(rv) >= Math.abs(nrv) || (Math.abs(rv)===1 && Math.abs(nrv)===7)) fs += 1000000;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    m.push({ a:'flip', idx:i, rv, s: fs + 10 });
+                } else if (isMine) {
+                    for(let j=0; j<32; j++) { 
+                        if(isValid(i,j,b)) {
+                            const target = b[j];
+                            let targetRank = target !== 0 ? Math.abs(Math.abs(target) > 100 ? (target > 0 ? target - 100 : target + 100) : target) : 0;
+                            
+                            // 斬首獵殺權重：吃掉大棋的分數呈指數級增長
+                            let ms = target !== 0 ? VAL_MAP[targetRank] * 100000 : 10;
+                            
+                            // 距離修正：引導棋子主動包圍中心區
+                            if(target===0) ms -= (Math.abs(Math.floor(i/4)-3.5) + Math.abs(i%4-1.5));
+                            m.push({ a:'move', from:i, to:j, s: ms });
+                        }
+                    }
+                }
+            }
+            return m.sort((a,b)=>b.s-a.s);
+        }
+
+        function minimax(b, d, al, be, isMax, isRed, st, limit) {
+            if(isTimeout) return 0;
+            if((++nodeCount & 255) === 0 && Date.now()-st >= limit) { isTimeout = true; return 0; }
+            const ev = evaluate(b, isRed);
+            if(Math.abs(ev)>9000000 || d===0) return ev;
+            const currentColor = isMax ? isRed : !isRed;
+            const moves = generate(b, currentColor, false, isRed);
+            if(moves.length === 0) return ev;
+            if(isMax) {
+                let mx = -Infinity;
+                for(let m of moves.slice(0, 16)) {
+                    const nb = new Int8Array(b); if(m.a==='flip') nb[m.idx]=m.rv; else { nb[m.to]=nb[m.from]; nb[m.from]=0; }
+                    const res = minimax(nb, d-1, al, be, false, isRed, st, limit);
+                    if(isTimeout) return 0; mx = Math.max(mx, res); al = Math.max(al, res); if(be<=al) break;
+                }
+                return mx;
+            } else {
+                let mi = Infinity;
+                for(let m of moves.slice(0, 16)) {
+                    const nb = new Int8Array(b); if(m.a==='flip') nb[m.idx]=m.rv; else { nb[m.to]=nb[m.from]; nb[m.from]=0; }
+                    const res = minimax(nb, d-1, al, be, true, isRed, st, limit);
+                    if(isTimeout) return 0; mi = Math.min(mi, res); be = Math.min(be, res); if(be<=al) break;
+                }
+                return mi;
+            }
+        }
+
+        self.onmessage = function(e) {
+            const { boardData, aiColor, timeLimit } = e.data;
+            const b = new Int8Array(boardData), isRed = aiColor === 'red', st = Date.now();
+            isTimeout = false; nodeCount = 0;
+            const mvs = generate(b, isRed, true, isRed);
+            if(mvs.length === 0) { self.postMessage({ move: null }); return; }
+            let best = mvs[0], mx = -Infinity;
+            for(let d=4; d<=10; d+=2) {
+                let cBest = null, cScore = -Infinity;
+                for(let m of mvs.slice(0, 16)) {
+                    const nb = new Int8Array(b); if(m.a==='flip') nb[m.idx]=m.rv; else { nb[m.to]=nb[m.from]; nb[m.from]=0; }
+                    const s = minimax(nb, d-1, -Infinity, Infinity, false, isRed, st, timeLimit);
+                    if(isTimeout) break;
+                    if(s > cScore) { cScore = s; cBest = m; }
+                }
+                if(isTimeout) break;
+                if(cScore > mx && cBest) { mx = cScore; best = cBest; }
+            }
+            self.postMessage({ move: best });
+        };
+    </script>
+
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // --- 內建 SVG 圖示庫 (替代 lucide-react，實現零依賴) ---
-        const Icon = ({ children, size = 24, className = "" }) => (
-            <svg viewBox="0 0 24 24" width={size} height={size} stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" className={className}>
-                {children}
-            </svg>
-        );
+        const Icon = ({ children, size = 24, className = "" }) => ( <svg viewBox="0 0 24 24" width={size} height={size} stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" className={className}>{children}</svg> );
         const Trophy = (p) => <Icon {...p}><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 1.1-.9 2-2 2H4"/><path d="M14 14.66V17c0 1.1.9 2 2 2h12"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></Icon>;
         const RefreshCw = (p) => <Icon {...p}><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></Icon>;
         const Volume2 = (p) => <Icon {...p}><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></Icon>;
         const VolumeX = (p) => <Icon {...p}><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></Icon>;
+        const AlertCircle = (p) => <Icon {...p}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" i="16"/></Icon>;
         const Flag = (p) => <Icon {...p}><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></Icon>;
-        const MessageCircle = (p) => <Icon {...p}><path d="m3 21 1.9-5.7a8.5 8.5 0 1 1 3.8 3.8z"/></Icon>;
-        const AlertCircle = (p) => <Icon {...p}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></Icon>;
         const Clock = (p) => <Icon {...p}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></Icon>;
-        const Zap = (p) => <Icon {...p}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></Icon>;
-        const LogOut = (p) => <Icon {...p}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></Icon>;
 
-        // --- 1. 音效管理器 (Web Audio API) ---
-        const audioCtx = typeof window !== 'undefined' ? new (window.AudioContext || window.webkitAudioContext)() : null;
+        const PIECE_TYPES = { GENERAL:7, GUARD:6, BISHOP:5, ROOK:4, HORSE:3, CANNON:2, SOLDIER:1 };
+        const TAUNTS = [ "斬首完成，你已無路可退。", "算力獵殺，這就是降維打擊。", "你的大將已盡數折損，認輸吧。", "天眼之下，所有的埋伏都是笑話。", "東方不敗的字典裡只有殺戮。", "既然實力懸殊，早點放棄也好。" ];
 
-        const playSound = (type) => {
-            if (!audioCtx) return;
-            if (audioCtx.state === 'suspended') audioCtx.resume();
-            const osc = audioCtx.createOscillator();
-            const gainNode = audioCtx.createGain();
-            osc.connect(gainNode);
-            gainNode.connect(audioCtx.destination);
-            const now = audioCtx.currentTime;
-            switch (type) {
-                case 'flip': 
-                    osc.type = 'sine'; osc.frequency.setValueAtTime(800, now);
-                    gainNode.gain.setValueAtTime(0.3, now); gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
-                    osc.start(now); osc.stop(now + 0.1); break;
-                case 'move':
-                    osc.type = 'triangle'; osc.frequency.setValueAtTime(300, now);
-                    gainNode.gain.setValueAtTime(0.2, now); gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
-                    osc.start(now); osc.stop(now + 0.1); break;
-                case 'eat': 
-                    osc.type = 'square'; osc.frequency.setValueAtTime(150, now);
-                    gainNode.gain.setValueAtTime(0.4, now); gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
-                    osc.start(now); osc.stop(now + 0.3); break;
-                case 'win': 
-                    [440, 554, 659, 880].forEach((freq, i) => {
-                        const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
-                        o.connect(g); g.connect(audioCtx.destination);
-                        o.frequency.setValueAtTime(freq, now + i*0.1);
-                        g.gain.setValueAtTime(0.2, now + i*0.1); g.gain.linearRampToValueAtTime(0, now + i*0.1 + 0.5);
-                        o.start(now + i*0.1); o.stop(now + i*0.1 + 0.5);
-                    }); break;
-                case 'lose': 
-                    osc.type = 'sawtooth'; osc.frequency.setValueAtTime(200, now);
-                    gainNode.gain.setValueAtTime(0.3, now); gainNode.gain.linearRampToValueAtTime(0, now + 0.8);
-                    osc.start(now); osc.stop(now + 0.8); break;
-                case 'warning': 
-                    osc.type = 'sawtooth'; osc.frequency.setValueAtTime(600, now);
-                    gainNode.gain.setValueAtTime(0.1, now); gainNode.gain.linearRampToValueAtTime(0, now + 0.3);
-                    osc.start(now); osc.stop(now + 0.3); break;
-                case 'tactic': 
-                    osc.type = 'sine'; osc.frequency.setValueAtTime(800, now); 
-                    osc.frequency.linearRampToValueAtTime(1200, now + 0.1);
-                    gainNode.gain.setValueAtTime(0.1, now); gainNode.gain.linearRampToValueAtTime(0, now + 0.3);
-                    osc.start(now); osc.stop(now + 0.3); break;
-                default: break;
-            }
-        };
-
-        // --- 2. 遊戲常數與 AI 價值觀 ---
-        const PIECE_TYPES = {
-            GENERAL: { rank: 7, name: { red: '帥', black: '將' } },
-            GUARD:   { rank: 6, name: { red: '仕', black: '士' } },
-            BISHOP:  { rank: 5, name: { red: '相', black: '象' } },
-            ROOK:    { rank: 4, name: { red: '俥', black: '車' } },
-            HORSE:   { rank: 3, name: { red: '傌', black: '馬' } },
-            CANNON:  { rank: 2, name: { red: '炮', black: '包' } },
-            SOLDIER: { rank: 1, name: { red: '兵', black: '卒' } },
-        };
-
-        const INITIAL_PIECES_CONFIG = [
-            { type: 'GENERAL', count: 1 }, { type: 'GUARD', count: 2 }, { type: 'BISHOP', count: 2 },
-            { type: 'ROOK', count: 2 }, { type: 'HORSE', count: 2 }, { type: 'CANNON', count: 2 }, { type: 'SOLDIER', count: 5 },
-        ];
-
-        const STRATEGIC_VALUES = { 'GENERAL': 2500, 'GUARD': 400, 'BISHOP': 300, 'ROOK': 1200, 'HORSE': 600, 'CANNON': 1300, 'SOLDIER': 250 };
-
-        const OPPONENTS = [
-            { id: 3, name: '東方不敗', avatar: '👺', level: '東方不敗 (10級)', difficulty: 10, winPoints: 500, losePoints: 500, intro: '欲練神功，必先宮你，你走不出這局的。' }
-        ];
-
-        const AVATAR_LIST = ['👴', '👺', '👨', '👩'];
-
-        // --- 3. 核心演算法引擎 ---
-        const getObstacleCount = (fromIdx, toIdx, board) => {
-            const r1 = Math.floor(fromIdx / 4); const c1 = fromIdx % 4;
-            const r2 = Math.floor(toIdx / 4); const c2 = toIdx % 4;
-            let count = 0;
-            if (r1 === r2) { 
-                const minC = Math.min(c1, c2); const maxC = Math.max(c1, c2);
-                for (let c = minC + 1; c < maxC; c++) if (board[r1 * 4 + c]) count++;
-            } else if (c1 === c2) {
-                const minR = Math.min(r1, r2); const maxR = Math.max(r1, r2);
-                for (let r = minR + 1; r < maxR; r++) if (board[r * 4 + c1]) count++;
-            } else return -1;
-            return count;
-        };
-
-        const isValidMove = (fromIdx, toIdx, board) => {
-            const from = board[fromIdx]; const to = board[toIdx];
-            if (!from || from.hidden) return false;
-            const dist = Math.abs(Math.floor(fromIdx/4) - Math.floor(toIdx/4)) + Math.abs((fromIdx%4) - (toIdx%4));
-            const isStraight = (Math.floor(fromIdx/4) === Math.floor(toIdx/4)) || (fromIdx%4 === toIdx%4);
-
-            if (from.type === 'CANNON') {
-                if (!isStraight) return false;
-                if (to) return getObstacleCount(fromIdx, toIdx, board) === 1 && from.color !== to.color && !to.hidden;
-                else return dist === 1;
-            }
-            if (dist !== 1) return false;
-            if (!to) return true;
-            if (to.hidden || from.color === to.color) return false;
-            
-            if (from.rank === 1) return to.rank === 7 || to.rank === 1; 
-            if (from.rank === 7) return to.rank !== 1;
-            return from.rank >= to.rank;
-        };
-
-        const isThreatened = (idx, board, myColor) => {
-            const oppColor = myColor === 'red' ? 'black' : 'red';
-            const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-            for (let [dr, dc] of dirs) {
-                const nr = Math.floor(idx / 4) + dr; const nc = (idx % 4) + dc;
-                if (nr >= 0 && nr < 8 && nc >= 0 && nc < 4) {
-                    const neighbor = board[nr * 4 + nc];
-                    if (neighbor && !neighbor.hidden && neighbor.color === oppColor && neighbor.type !== 'CANNON') {
-                        if (isValidMove(nr * 4 + nc, idx, board)) return true;
-                    }
-                }
-            }
-            for (let dir of dirs) {
-                let obsCount = 0;
-                for (let k = 1; k < 8; k++) {
-                    const nr = Math.floor(idx / 4) + dir[0]*k; const nc = (idx % 4) + dir[1]*k;
-                    if (nr < 0 || nr >= 8 || nc < 0 || nc >= 4) break;
-                    const target = board[nr * 4 + nc];
-                    if (target) {
-                        obsCount++;
-                        if (obsCount === 2) {
-                            if (!target.hidden && target.color === oppColor && target.type === 'CANNON') return true;
-                            break;
-                        }
-                    }
-                }
-            }
-            return false;
-        };
-
-        const getGameStats = (board, aiColor) => {
-            let myScore = 0; let oppScore = 0;
-            let oppGenAlive = false; let myGenAlive = false; let oppGenIdx = -1;
-            board.forEach((p, i) => {
-                if(!p || p.hidden) return;
-                if (p.color === aiColor) {
-                    myScore += STRATEGIC_VALUES[p.type];
-                    if(p.type === 'GENERAL') myGenAlive = true;
-                } else {
-                    oppScore += STRATEGIC_VALUES[p.type];
-                    if(p.type === 'GENERAL') { oppGenAlive = true; oppGenIdx = i; }
-                }
-            });
-            return { myScore, oppScore, oppGenAlive, myGenAlive, oppGenIdx };
-        };
-
-        const evaluateBoard = (board, aiColor) => {
-            let score = 0;
-            const stats = getGameStats(board, aiColor);
-            
-            board.forEach((p, idx) => {
-                if (!p || p.hidden) return;
-                const isMine = p.color === aiColor;
-                let val = STRATEGIC_VALUES[p.type];
-                const r = Math.floor(idx/4); const c = idx%4;
-
-                const centerDist = Math.abs(r - 3.5) + Math.abs(c - 1.5);
-                val += (6 - centerDist) * 15; 
-
-                if (p.type === 'SOLDIER') {
-                    if (isMine && stats.oppGenAlive) val += 1000; 
-                    if (!isMine && stats.myGenAlive) val += 1000;
-                }
-
-                score += isMine ? val : -val;
-
-                const threatened = isThreatened(idx, board, p.color);
-                if (threatened) {
-                    score += isMine ? -val * 1.5 : val * 1.5;
-                }
-
-                let mobility = 0;
-                const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
-                dirs.forEach(([dr,dc]) => {
-                    const nr = r+dr; const nc = c+dc;
-                    if(nr>=0 && nr<8 && nc>=0 && nc<4 && !board[nr*4+nc]) mobility++;
-                });
-
-                if (isMine) {
-                    score += mobility * 15;
-                    if (p.type === 'SOLDIER' && stats.oppGenAlive && stats.oppGenIdx !== -1) {
-                        const dist = Math.abs(r - Math.floor(stats.oppGenIdx/4)) + Math.abs(c - stats.oppGenIdx%4);
-                        score += (10 - dist) * 40; 
-                    }
-                } else {
-                    score -= mobility * 15; 
-                }
-            });
-            return score;
-        };
-
-        const getLegalActions = (board, color) => {
-            const actions = [];
-            board.forEach((p, idx) => {
-                if (!p) return;
-                if (p.hidden) { actions.push({ action: 'flip', idx: idx, score: 0 }); return; }
-                if (p.color === color) {
-                    for (let i = 0; i < 32; i++) {
-                        if (isValidMove(idx, i, board)) {
-                            let moveScore = 0;
-                            if (board[i]) {
-                                moveScore = STRATEGIC_VALUES[board[i].type] * 100 - STRATEGIC_VALUES[p.type];
-                            } else {
-                                moveScore = 50 - (Math.abs(Math.floor(i/4) - 3.5) + Math.abs((i%4) - 1.5)) * 5;
-                            }
-                            
-                            const nextBoard = [...board]; nextBoard[i] = p; nextBoard[idx] = null;
-                            if (isThreatened(i, nextBoard, color)) {
-                                const tradeGain = board[i] ? STRATEGIC_VALUES[board[i].type] - STRATEGIC_VALUES[p.type] : -STRATEGIC_VALUES[p.type];
-                                if (tradeGain < 0) moveScore -= 100000; 
-                            }
-                            actions.push({ action: 'move', from: idx, to: i, score: moveScore });
-                        }
-                    }
-                }
-            });
-            return actions.sort((a, b) => b.score - a.score);
-        };
-
-        const minimax = (board, depth, isMaximizing, aiColor, alpha, beta) => {
-            if (depth === 0) return evaluateBoard(board, aiColor);
-            const color = isMaximizing ? aiColor : (aiColor === 'red' ? 'black' : 'red');
-            const actions = getLegalActions(board, color).filter(a => a.action === 'move').slice(0, 4);
-            
-            if (actions.length === 0) return evaluateBoard(board, aiColor);
-
-            if (isMaximizing) {
-                let maxEval = -Infinity;
-                for (const act of actions) {
-                    const nextBoard = [...board]; nextBoard[act.to] = nextBoard[act.from]; nextBoard[act.from] = null;
-                    const ev = minimax(nextBoard, depth - 1, false, aiColor, alpha, beta);
-                    maxEval = Math.max(maxEval, ev);
-                    alpha = Math.max(alpha, ev);
-                    if (beta <= alpha) break; 
-                }
-                return maxEval;
-            } else {
-                let minEval = Infinity;
-                for (const act of actions) {
-                    const nextBoard = [...board]; nextBoard[act.to] = nextBoard[act.from]; nextBoard[act.from] = null;
-                    const ev = minimax(nextBoard, depth - 1, true, aiColor, alpha, beta);
-                    minEval = Math.min(minEval, ev);
-                    beta = Math.min(beta, ev);
-                    if (beta <= alpha) break; 
-                }
-                return minEval;
-            }
-        };
-
-        const getBestMoveFinal = (board, aiColor, diff, aiMoveHistory) => {
-            const stats = getGameStats(board, aiColor);
-            let moves = getLegalActions(board, aiColor).filter(a => a.action === 'move');
-            const oppColor = aiColor === 'red' ? 'black' : 'red';
-
-            // 斷路器：杜絕無意義追逐
-            moves.forEach(m => {
-                if (aiMoveHistory && aiMoveHistory.length > 0) {
-                    const lastMove = aiMoveHistory[aiMoveHistory.length - 1];
-                    if (lastMove.to === m.from && !board[m.to]) m.score -= 50; 
-                    if (lastMove.from === m.to && lastMove.to === m.from) m.score -= 300;
-                }
-            });
-            moves.sort((a, b) => b.score - a.score);
-
-            // 1. 動態翻牌機率 (含避天敵邏輯)
-            let bestFlip = null; let maxFlipScore = -Infinity;
-            board.forEach((p, idx) => {
-                if (p && p.hidden) {
-                    let score = 50;
-                    const r = Math.floor(idx/4); const c = idx%4;
-                    
-                    // a. 避開敵方高階棋鄰近區域
-                    board.forEach((ep, eIdx) => {
-                        if (ep && !ep.hidden && ep.color === oppColor) {
-                            const er = Math.floor(eIdx/4); const ec = eIdx%4;
-                            const dist = Math.abs(er - r) + Math.abs(ec - c);
-                            if (dist === 1 && ep.rank >= 5) {
-                                score -= 500; 
-                            }
-                            if (ep.type === 'CANNON' && (er === r || ec === c)) {
-                                let obsCount = 0;
-                                let dr = er === r ? 0 : (r > er ? 1 : -1); let dc = ec === c ? 0 : (c > ec ? 1 : -1);
-                                let currR = er + dr; let currC = ec + dc;
-                                while(currR !== r || currC !== c) {
-                                    if (board[currR*4 + currC]) obsCount++;
-                                    currR += dr; currC += dc;
-                                }
-                                if (obsCount === 1) score -= 500; 
-                            }
-                        }
-                    });
-
-                    if ((stats.myScore - stats.oppScore) > 1500) score -= 500; 
-                    if (score > maxFlipScore) { maxFlipScore = score; bestFlip = { action: 'flip', idx: idx, score }; }
-                }
-            });
-
-            // 2. 立即戰術檢測 (獵殺優先)
-            let bestHunt = null; let maxHuntGain = -Infinity;
-            for (const m of moves) {
-                const target = board[m.to];
-                if (target) {
-                    const nextBoard = [...board]; nextBoard[m.to] = board[m.from]; nextBoard[m.from] = null;
-                    const isSafe = !isThreatened(m.to, nextBoard, aiColor);
-                    const gain = STRATEGIC_VALUES[target.type];
-                    const cost = isSafe ? 0 : STRATEGIC_VALUES[board[m.from].type];
-                    const netGain = gain - cost;
-                    if (netGain > 0 && netGain > maxHuntGain) {
-                        maxHuntGain = netGain; bestHunt = m;
-                    }
-                }
-            }
-            if (bestHunt && maxHuntGain > 0) return bestHunt;
-
-            if (moves.length === 0) return bestFlip;
-
-            // 3. Alpha-Beta 深搜 (鎖定 Depth 8)
-            let searchDepth = 8; 
-            let bestMinimaxMove = null; let maxMoveScore = -Infinity;
-
-            const candidates = moves.filter(m => m.score > -5000).slice(0, 5);
-            const searchPool = candidates.length > 0 ? candidates : moves.slice(0, 1);
-
-            for (const act of searchPool) {
-                const nextBoard = [...board]; nextBoard[act.to] = nextBoard[act.from]; nextBoard[act.from] = null;
-                const val = minimax(nextBoard, searchDepth, false, aiColor, -Infinity, Infinity);
-                if (val > maxMoveScore) { maxMoveScore = val; bestMinimaxMove = act; }
-            }
-
-            const currentScore = evaluateBoard(board, aiColor);
-            if (bestMinimaxMove && (maxMoveScore > currentScore || maxFlipScore < 0)) return bestMinimaxMove;
-            return bestFlip || bestMinimaxMove || moves[0];
-        };
-
-        const detectTactic = (move, board, aiColor) => {
-            if (move.action === 'flip') return null;
-            const piece = board[move.from]; const target = board[move.to];
-            if (piece.type === 'SOLDIER' && target && target.type === 'GENERAL') return "獵殺";
-            if (piece.type === 'CANNON' && target && target.color !== aiColor) return "精準狙擊"; 
-            return null;
-        };
-
-        const getChatLine = (tactic, isIdle) => {
-            if (isIdle) return ["動作快點啦！", "發呆阿？", "不敢下喔？", "換你了！"][Math.floor(Math.random()*4)];
-            if (tactic) return `看我東方不敗的：${tactic}！`;
-            return ["我已經看到了你的結局。", "一切都在我的計算中。", "無謂的掙扎。", "絕望吧，凡人。"][Math.floor(Math.random()*4)];
-        };
-
-        // --- 4. React 主組件 ---
         function HiddenChessApp() {
             const [gameState, setGameState] = useState('lobby'); 
             const [board, setBoard] = useState(Array(32).fill(null));
             const [turn, setTurn] = useState('red'); 
             const [userColor, setUserColor] = useState(null); 
-            const [selectedIdx, setSelectedIdx] = useState(null); 
-            const [graveyard, setGraveyard] = useState({ red: [], black: [] }); 
-            const [animatingPiece, setAnimatingPiece] = useState(null);
-
-            const [playerName, setPlayerName] = useState('林大爺');
-            const [playerAvatar, setPlayerAvatar] = useState('👨');
             const [playerScore, setPlayerScore] = useState(10000); 
-            const [opponent, setOpponent] = useState(OPPONENTS[0]); 
-            
-            const [isAiThinking, setIsAiThinking] = useState(false);
-            const [chatMessage, setChatMessage] = useState(''); 
-            const chatTimeoutRef = useRef(null);
-            const aiMoveHistoryRef = useRef([]); 
-            
-            const [soundOn, setSoundOn] = useState(true);
-            const [showLossConfirm, setShowLossConfirm] = useState(false);
+            const [animatingPiece, setAnimatingPiece] = useState(null);
             const [showWinScreen, setShowWinScreen] = useState(false);
-            const [playerTimeLeft, setPlayerTimeLeft] = useState(40); 
-            const timerRef = useRef(null);
+            const [winMessage, setWinMessage] = useState({});
+            const [playerTimeLeft, setPlayerTimeLeft] = useState(60);
+            const [eatToast, setEatToast] = useState(null);
+            const [noProgressCount, setNoProgressCount] = useState(0);
+            const [matchHistory, setMatchHistory] = useState([]);
+            const [selectedIdx, setSelectedIdx] = useState(null);
+            const [soundOn, setSoundOn] = useState(true);
+            const [isAiThinking, setIsAiThinking] = useState(false);
             const [showTimeoutWarning, setShowTimeoutWarning] = useState(false);
-            const [tacticAlert, setTacticAlert] = useState(''); 
+            const [graveyard, setGraveyard] = useState({ red: [], black: [] }); 
+            
+            const aiWorkerRef = useRef(null);
+            const timerRef = useRef(null);
+            const audioCtxRef = useRef(null);
 
-            const handleExit = () => { if (window.confirm("確定要離開遊戲嗎？")) window.close(); };
+            const playSound = (type) => {
+                if (!soundOn) return;
+                if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+                const ctx = audioCtxRef.current;
+                if (ctx.state === 'suspended') ctx.resume();
+                const osc = ctx.createOscillator(); const g = ctx.createGain();
+                osc.connect(g); g.connect(ctx.destination);
+                const now = ctx.currentTime;
+                switch (type) {
+                    case 'flip': osc.type='sine'; osc.frequency.setValueAtTime(800, now); g.gain.setValueAtTime(0.2, now); g.gain.exponentialRampToValueAtTime(0.01, now+0.1); osc.start(); osc.stop(now+0.1); break;
+                    case 'move': osc.type='triangle'; osc.frequency.setValueAtTime(300, now); g.gain.setValueAtTime(0.1, now); g.gain.exponentialRampToValueAtTime(0.01, now+0.1); osc.start(); osc.stop(now+0.1); break;
+                    case 'eat': osc.type='square'; osc.frequency.setValueAtTime(150, now); g.gain.setValueAtTime(0.3, now); g.gain.exponentialRampToValueAtTime(0.01, now+0.3); osc.start(); osc.stop(now+0.3); break;
+                    case 'win': [440, 554, 659, 880].forEach((f, i) => { const o = ctx.createOscillator(), gg = ctx.createGain(); o.connect(gg); gg.connect(ctx.destination); o.frequency.setValueAtTime(f, now+i*0.1); gg.gain.setValueAtTime(0.1, now+i*0.1); gg.gain.linearRampToValueAtTime(0, now+i*0.1+0.5); o.start(now+i*0.1); o.stop(now+i*0.1+0.5); }); break;
+                    case 'lose': osc.type='sawtooth'; osc.frequency.setValueAtTime(200, now); g.gain.setValueAtTime(0.3, now); g.gain.linearRampToValueAtTime(0, now + 0.8); osc.start(now); osc.stop(now + 0.8); break;
+                    case 'warning': osc.type='sawtooth'; osc.frequency.setValueAtTime(600, now); g.gain.setValueAtTime(0.1, now); g.gain.linearRampToValueAtTime(0, now + 0.3); osc.start(now); osc.stop(now + 0.3); break;
+                }
+            };
 
             useEffect(() => {
+                const code = document.getElementById('worker-code').textContent;
+                const blob = new Blob([code], { type: 'application/javascript' });
+                aiWorkerRef.current = new Worker(URL.createObjectURL(blob));
                 const savedScore = localStorage.getItem('hiddenChess_score');
-                if (savedScore) {
-                    setPlayerScore(parseInt(savedScore, 10));
-                } else {
-                    setPlayerScore(10000);
-                    localStorage.setItem('hiddenChess_score', '10000');
-                }
+                if (savedScore) setPlayerScore(parseInt(savedScore, 10));
+                return () => aiWorkerRef.current.terminate();
             }, []);
+
+            const recordMove = (move) => setMatchHistory(prev => [...prev, { ...move, t: Date.now() }]);
+
+            const endGame = (isWin, detail, isDraw = false) => {
+                if (gameState === 'ended') return; 
+                setGameState('ended');
+                setIsAiThinking(false);
+                const pts = isDraw ? 0 : (isWin ? 500 : -500);
+                setPlayerScore(s => { const ns = s + pts; localStorage.setItem('hiddenChess_score', ns.toString()); return ns; });
+                setWinMessage({ title: isDraw ? '平局！' : (isWin ? '不可思議！' : '敗局！'), detail, points: isDraw ? '+ 0' : (isWin ? '+ 500' : '- 500') });
+                setShowWinScreen(true);
+                if (!isDraw) playSound(isWin ? 'win' : 'lose');
+                const archive = JSON.parse(localStorage.getItem('hiddenChess_archive') || '[]');
+                archive.push({ isWin, detail, date: new Date().toISOString(), history: matchHistory });
+                localStorage.setItem('hiddenChess_archive', JSON.stringify(archive.slice(-100)));
+            };
+
+            const handleSurrender = () => endGame(false, TAUNTS[Math.floor(Math.random() * TAUNTS.length)]);
 
             useEffect(() => {
                 if (gameState === 'playing' && userColor && turn === userColor) {
                     timerRef.current = setInterval(() => {
                         setPlayerTimeLeft((prev) => {
-                            if (prev <= 1) { clearInterval(timerRef.current); handleTimeoutLoss(); return 0; }
-                            if (prev === 30) triggerChat(null, true); 
-                            if (prev === 11) { setShowTimeoutWarning(true); if (soundOn) playSound('warning'); }
+                            if (prev === 21) { setShowTimeoutWarning(true); playSound('warning'); }
+                            if (prev <= 1) { clearInterval(timerRef.current); endGame(false, "思考超時，判負。"); return 0; }
                             return prev - 1;
                         });
                     }, 1000);
-                } else { clearInterval(timerRef.current); setPlayerTimeLeft(40); setShowTimeoutWarning(false); }
+                } else { clearInterval(timerRef.current); setPlayerTimeLeft(60); setShowTimeoutWarning(false); }
                 return () => clearInterval(timerRef.current);
-            }, [turn, userColor, gameState]);
+            }, [turn, userColor, gameState, soundOn]);
 
-            const handleTimeoutLoss = () => { setShowLossConfirm(true); setShowTimeoutWarning(false); };
+            const downloadArchive = () => {
+                const a = localStorage.getItem('hiddenChess_archive') || '[]';
+                const b = new Blob([a], { type: 'application/json' });
+                const u = URL.createObjectURL(b); const l = document.createElement('a');
+                l.href = u; l.download = `chess_logs_${Date.now()}.json`; l.click();
+            };
 
             const initGame = () => {
-                let pieces = [];
-                ['red', 'black'].forEach(color => {
-                INITIAL_PIECES_CONFIG.forEach(cfg => {
-                    for (let i = 0; i < cfg.count; i++) {
-                    pieces.push({ id: `${color}-${cfg.type}-${i}`, color, type: cfg.type, rank: PIECE_TYPES[cfg.type].rank, name: PIECE_TYPES[cfg.type].name[color], hidden: true, dead: false });
+                let p = [];
+                ['red', 'black'].forEach(c => {
+                    const counts = { GENERAL:1, GUARD:2, BISHOP:2, ROOK:2, HORSE:2, CANNON:2, SOLDIER:5 };
+                    Object.entries(counts).forEach(([type, n]) => {
+                        for(let i=0; i<n; i++) p.push({ id:`${c}-${type}-${i}`, color:c, type, hidden:true, name:(c==='red'?{GENERAL:'帥',GUARD:'仕',BISHOP:'相',ROOK:'俥',HORSE:'傌',CANNON:'炮',SOLDIER:'兵'}:{GENERAL:'將',GUARD:'士',BISHOP:'象',ROOK:'車',HORSE:'馬',CANNON:'包',SOLDIER:'卒'})[type] });
+                    });
+                });
+                for (let i = p.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
+                setBoard(p); setTurn('red'); setUserColor(null); setGraveyard({ red: [], black: [] }); setGameState('playing'); setShowWinScreen(false); setNoProgressCount(0); setSelectedIdx(null); setPlayerTimeLeft(60); setMatchHistory([]);
+            };
+
+            const getObstacleCountFE = (f, t, b) => {
+                const r1 = Math.floor(f/4), c1 = f%4, r2 = Math.floor(t/4), c2 = t%4;
+                let cnt = 0;
+                if (r1 === r2) { for (let c = Math.min(c1, c2) + 1; c < Math.max(c1, c2); c++) if (b[r1*4+c]) cnt++; }
+                else if (c1 === c2) { for (let r = Math.min(r1, r2) + 1; r < Math.max(r1, r2); r++) if (b[r*4+c1]) cnt++; }
+                else return -1;
+                return cnt;
+            };
+
+            const isValidFE = (f, t, b) => {
+                const pf = b[f], pt = b[t]; if (!pf || pf.hidden) return false;
+                const d = Math.abs(Math.floor(f/4)-Math.floor(t/4)) + Math.abs((f%4)-(t%4));
+                if (pf.type === 'CANNON') {
+                    if (Math.floor(f/4)!==Math.floor(t/4) && f%4!==t%4) return false;
+                    if (pt) {
+                        let cnt = getObstacleCountFE(f,t,b);
+                        return cnt === 1 && !pt.hidden && pf.color !== pt.color;
                     }
+                    return d === 1;
+                }
+                if (d !== 1) return false; if (!pt) return true; if (pt.hidden || pf.color === pt.color) return false;
+                const fr = PIECE_TYPES[pf.type], tr = PIECE_TYPES[pt.type];
+                return fr === 1 ? (tr === 7 || tr === 1) : (fr === 7 ? tr !== 1 : fr >= tr);
+            };
+
+            const revealPiece = (idx) => {
+                playSound('flip');
+                setBoard(prev => {
+                    const nb = [...prev]; const p = { ...nb[idx], hidden: false }; nb[idx] = p;
+                    recordMove({ type:'REVEAL', idx, p:p.id });
+                    if (!userColor) { setUserColor(p.color); setTurn(p.color === 'red' ? 'black' : 'red'); }
+                    else setTurn(t => (t === 'red' ? 'black' : 'red'));
+                    return nb;
                 });
-                });
-                for (let i = pieces.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [pieces[i], pieces[j]] = [pieces[j], pieces[i]];
-                }
-                setBoard(pieces);
-                setTurn('red'); setUserColor(null); setGraveyard({ red: [], black: [] });
-                setGameState('playing'); setShowLossConfirm(false); setShowWinScreen(false);
-                setTacticAlert(''); setSelectedIdx(null); setAnimatingPiece(null); setIsAiThinking(false); setPlayerTimeLeft(40);
-                aiMoveHistoryRef.current = [];
-                triggerChat("欲練神功，必先宮你！", false);
+                setSelectedIdx(null); setNoProgressCount(0);
             };
 
-            const updateScore = (isWin) => {
-                let newScore = isWin ? playerScore + opponent.winPoints : Math.max(0, playerScore - opponent.losePoints);
-                setPlayerScore(newScore);
-                localStorage.setItem('hiddenChess_score', newScore.toString());
-            };
-
-            const handleCellClick = (index) => {
-                if (gameState !== 'playing' || isAiThinking || animatingPiece) return;
-                if (userColor && turn !== userColor) return; 
-                const clickedPiece = board[index];
-                if (clickedPiece && clickedPiece.hidden) { revealPiece(index); return; }
-                if (clickedPiece && !clickedPiece.hidden) { if (!userColor || clickedPiece.color === userColor) { setSelectedIdx(index); return; } }
-                if (selectedIdx !== null && selectedIdx !== index) {
-                if (board[selectedIdx] && isValidMove(selectedIdx, index, board)) startMoveAnimation(selectedIdx, index);
-                else { if (clickedPiece && clickedPiece.color === userColor) setSelectedIdx(index); else setSelectedIdx(null); }
-                } else if (selectedIdx === index) setSelectedIdx(null);
-            };
-
-            const revealPiece = (index) => {
-                if (soundOn) playSound('flip');
-                const newBoard = [...board];
-                const piece = newBoard[index];
-                if (!piece) return;
-                piece.hidden = false;
-                setBoard(newBoard);
-                if (turn !== userColor) aiMoveHistoryRef.current = [];
-                if (!userColor) {
-                setUserColor(piece.color);
-                setTurn(piece.color === 'red' ? 'black' : 'red'); 
-                } else setTurn(turn === 'red' ? 'black' : 'red');
-                setSelectedIdx(null);
-            };
-
-            const startMoveAnimation = (from, to) => {
-                const piece = board[from]; const target = board[to];
-                setAnimatingPiece({ fromIdx: from, toIdx: to, piece: piece, isCapture: !!target });
-                setTimeout(() => { executeMove(from, to); setAnimatingPiece(null); }, 300); 
-            };
-
-            const executeMove = (from, to) => {
-                const newBoard = [...board]; const attacker = newBoard[from]; const victim = newBoard[to];
-                if (!attacker) return; 
-                if (victim) {
-                if (soundOn) playSound('eat');
-                setGraveyard(prev => ({ ...prev, [victim.color]: [...prev[victim.color], victim] }));
-                if (turn !== userColor) aiMoveHistoryRef.current = [];
-                } else {
-                if (soundOn) playSound('move');
-                if (turn !== userColor) {
-                    aiMoveHistoryRef.current.push({ from, to });
-                    if (aiMoveHistoryRef.current.length > 4) aiMoveHistoryRef.current.shift();
-                }
-                }
-                newBoard[to] = attacker; newBoard[from] = null;
-                setBoard(newBoard);
-                const redCount = newBoard.filter(p=>p && p.color==='red').length;
-                const blackCount = newBoard.filter(p=>p && p.color==='black').length;
-                if (redCount === 0 || blackCount === 0) {
-                    const iWon = (userColor === 'red' && blackCount === 0) || (userColor === 'black' && redCount === 0);
-                    if (!iWon) setShowLossConfirm(true);
-                    else { setShowWinScreen(true); if (soundOn) playSound('win'); updateScore(true); }
-                }
-                setSelectedIdx(null); setTurn(turn === 'red' ? 'black' : 'red');
-            };
-
-            const triggerChat = (tactic, isIdle) => {
-                setChatMessage(getChatLine(tactic, isIdle));
-                clearTimeout(chatTimeoutRef.current);
-                chatTimeoutRef.current = setTimeout(() => setChatMessage(''), 3000);
-            };
-
-            useEffect(() => { if (gameState === 'playing' && userColor && turn !== userColor) triggerAiTurn(); }, [turn, userColor, gameState]);
-
-            const triggerAiTurn = () => {
-                if (isAiThinking) return;
-                setIsAiThinking(true);
-                
+            const startMove = (f, t) => {
+                const atk = board[f], vic = board[t];
+                setAnimatingPiece({ from: f, to: t, piece: atk }); setSelectedIdx(null);
                 setTimeout(() => {
-                    const bestMove = getBestMoveFinal(board, turn, opponent.difficulty, aiMoveHistoryRef.current);
-                    if (!bestMove) { setShowWinScreen(true); if(soundOn) playSound('win'); updateScore(true); setIsAiThinking(false); return; }
-
-                    let tactic = null;
-                    if (bestMove.action === 'move') {
-                        const target = board[bestMove.to];
-                        if (target && target.color !== turn) tactic = "精準獵殺";
-                        else tactic = detectTactic(bestMove, board, turn);
-                    } 
-                    
-                    if (tactic && Math.random() < 0.6) {
-                        setTacticAlert(`⚡ ${tactic}`);
-                        if(soundOn) playSound('tactic');
-                        setTimeout(() => setTacticAlert(''), 2000);
-                        triggerChat(tactic, false);
-                    } else if (Math.random() < 0.2) {
-                        triggerChat(null, false);
-                    }
-                    
-                    setTimeout(() => { 
-                        if (bestMove.action === 'flip') revealPiece(bestMove.idx); 
-                        else startMoveAnimation(bestMove.from, bestMove.to); 
-                        setIsAiThinking(false); 
-                    }, 600);
+                    setBoard(prev => {
+                        const nb = [...prev]; const a = nb[f], v = nb[t];
+                        if (v) {
+                            playSound('eat'); setGraveyard(g => ({ ...g, [v.color]: [...g[v.color], v] }));
+                            setEatToast(`${a.color==='red'?'紅':'黑'}:${a.name} 吃 ${v.color==='red'?'紅':'黑'}:${v.name}`);
+                            setTimeout(() => setEatToast(null), 400); setNoProgressCount(0);
+                        } else { playSound('move'); setNoProgressCount(c => c + 1); }
+                        nb[t] = a; nb[f] = null;
+                        recordMove({ type:'MOVE', f, t, atk:a.id, vic:v?v.id:null });
+                        return nb;
+                    });
+                    setAnimatingPiece(null);
+                    setTurn(cur => (cur === 'red' ? 'black' : 'red'));
                 }, 100);
             };
 
-            const getPos = (idx) => ({ top: `${Math.floor(idx / 4) * 12.5}%`, left: `${(idx % 4) * 25}%` });
+            useEffect(() => {
+                if (gameState !== 'playing') return;
+                const r = board.filter(x => x && x.color === 'red').length;
+                const b = board.filter(x => x && x.color === 'black').length;
+                if (r === 0 || b === 0) endGame((userColor === 'red' && b === 0) || (userColor === 'black' && r === 0), "戰至最後一兵一卒。");
+                else if (noProgressCount >= 60 && board.filter(x => x && x.color !== userColor).length <= 2) endGame(false, "僵局達成。", true);
+            }, [board, gameState, noProgressCount, userColor]);
+
+            useEffect(() => {
+                if (gameState === 'playing' && userColor && turn !== userColor && !isAiThinking) {
+                    setIsAiThinking(true);
+                    const intA = new Int8Array(32);
+                    board.forEach((p, i) => {
+                        if(!p) intA[i] = 0;
+                        else { 
+                            let v = PIECE_TYPES[p.type]; if (p.color === 'black') v = -v; 
+                            if (p.hidden) v = (v > 0 ? v + 100 : v - 100); intA[i] = v; 
+                        }
+                    });
+                    aiWorkerRef.current.onmessage = (e) => {
+                        const { move } = e.data;
+                        setTimeout(() => { if (!move) { setIsAiThinking(false); return; }
+                        if (move.a === 'flip') revealPiece(move.idx); else startMove(move.from, move.to);
+                        setIsAiThinking(false); }, 100);
+                    };
+                    aiWorkerRef.current.postMessage({ boardData: intA.buffer, aiColor: turn, timeLimit: 1800 });
+                }
+            }, [turn, userColor, gameState, board]);
+
+            const getPosFE = (idx) => ({ top: `${Math.floor(idx / 4) * 12.5}%`, left: `${(idx % 4) * 25}%` });
+
+            const handleCellClick = (idx) => {
+                if (gameState !== 'playing' || isAiThinking || (userColor && turn !== userColor)) return;
+                const p = board[idx];
+                if (p && p.hidden) { revealPiece(idx); return; }
+                if (p && !p.hidden && p.color === turn) { setSelectedIdx(idx); return; }
+                if (selectedIdx !== null && selectedIdx !== idx) { if (isValidFE(selectedIdx, idx, board)) startMove(selectedIdx, idx); }
+            };
 
             return (
-                <div className="flex flex-col h-screen bg-stone-900 font-serif select-none overflow-hidden items-center justify-center w-full">
-                {gameState === 'lobby' && (
-                    <div className="bg-stone-50 p-8 rounded-2xl shadow-xl border-2 border-stone-700 w-[95vw] max-w-md animate-fade-in text-stone-800">
-                    <h1 className="text-3xl font-bold mb-2 text-stone-900 tracking-widest text-center">賢哥的暗棋</h1>
-                    <div className="text-center mb-6 text-amber-600 font-bold flex items-center justify-center gap-2"><Trophy size={20} /><span>我的積分：{playerScore}</span></div>
-                    <div className="space-y-6">
-                        <div className="flex flex-wrap justify-center gap-3">
-                        {AVATAR_LIST.map(av => (<button key={av} onClick={() => setPlayerAvatar(av)} className={`p-3 rounded-xl transition-all text-3xl ${playerAvatar === av ? 'bg-amber-200 ring-2 ring-amber-500 scale-110' : 'bg-stone-100 hover:bg-stone-200'}`}>{av}</button>))}
+                <div className="flex flex-col h-screen bg-stone-100 font-serif select-none overflow-hidden items-center justify-center w-full relative">
+                    {eatToast && (
+                        <div className="absolute top-[40%] left-1/2 -translate-x-1/2 -translate-y-1/2 z-[150] pointer-events-none animate-flash-toast">
+                            <div className="bg-red-700 text-white px-8 py-3 rounded-full shadow-2xl text-2xl font-black tracking-widest border-4 border-red-900">{eatToast}</div>
                         </div>
-                        <div className="text-center font-bold text-stone-600">歡迎，{playerName}</div>
-                        <div className="pt-4 space-y-3">
-                        <label className="block text-lg font-bold text-center">終極 Boss 挑戰</label>
-                        {OPPONENTS.map((opp) => (
-                            <button key={opp.id} onClick={() => { setOpponent(opp); initGame(); }} className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-red-600 bg-red-50 hover:bg-red-100 transition-all shadow-lg">
-                            <div className="text-4xl">{opp.avatar}</div>
-                            <div className="text-left flex-1">
-                                <div className="font-bold text-xl text-red-900">{opp.name}</div>
-                                <div className="text-xs text-red-700 mb-1">{opp.level}</div>
-                                <div className="text-[10px] font-bold inline-block px-2 py-0.5 rounded border border-red-200 bg-white text-red-600">贏+{opp.winPoints} / 輸-{opp.losePoints}</div>
+                    )}
+
+                    {gameState === 'lobby' && (
+                        <div className="bg-white p-10 rounded shadow-lg border border-stone-200 w-[95vw] max-w-sm animate-fade-in text-stone-800 relative text-center">
+                            <h1 className="text-3xl font-bold mb-6 text-stone-900 tracking-widest">賢哥的暗棋</h1>
+                            <div className="mb-10 text-amber-700 font-bold flex items-center justify-center gap-2"><Trophy size={20} /><span>我的積分：{playerScore}</span></div>
+                            <div className="space-y-8">
+                                <div className="font-bold text-stone-800 text-lg">歡迎，林大爺</div>
+                                <button onClick={initGame} className="w-full flex items-center gap-4 p-5 rounded border-2 border-red-600 bg-white hover:bg-red-50 transition-all shadow-md active:scale-95">
+                                    <div className="text-4xl">👺</div>
+                                    <div className="text-left flex-1 font-bold text-xl text-stone-900">東方不敗<div className="text-[10px] text-red-600 font-black">贏+500 / 輸-500</div></div>
+                                </button>
                             </div>
-                            <Zap className="text-red-600 fill-current" />
-                            </button>
-                        ))}
-                        </div>
-                        <button onClick={handleExit} className="w-full mt-4 flex items-center justify-center gap-2 py-3 bg-stone-200 text-stone-500 rounded-xl hover:bg-red-50 hover:text-red-500 transition-colors font-bold"><LogOut size={20} />結束遊戲</button>
-                    </div>
-                    </div>
-                )}
-
-                {(gameState === 'playing' || gameState === 'ended') && (
-                    <div className="w-[95vw] max-w-lg flex flex-col h-[95vh] rounded-xl overflow-hidden shadow-2xl bg-white relative">
-                    
-                    {showWinScreen && (
-                        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 backdrop-blur-md p-4">
-                            {[...Array(20)].map((_, i) => (
-                                <div key={i} className="confetti" style={{ left: `${Math.random()*100}%`, animationDelay: `${Math.random()*2}s`, backgroundColor: i % 2 ? '#FFD700' : '#FF4500' }}></div>
-                            ))}
-                            <div className="bg-gradient-to-b from-amber-50 to-white rounded-3xl p-10 max-w-xs w-full text-center shadow-[0_0_50px_rgba(255,215,0,0.5)] border-4 border-amber-400 animate-fade-in relative overflow-hidden">
-                                <div className="absolute -top-10 -right-10 w-40 h-40 bg-amber-200 rounded-full blur-3xl opacity-50"></div>
-                                <div className="w-24 h-24 bg-amber-500 text-white rounded-full flex items-center justify-center mx-auto mb-6 shadow-xl animate-bounce">
-                                    <Trophy size={56} />
-                                </div>
-                                <h2 className="text-4xl font-black text-amber-900 mb-2 italic">不可思議！</h2>
-                                <p className="text-stone-600 font-bold mb-8">竟然打敗了東方不敗！<br/><span className="text-2xl text-red-600">+ {opponent.winPoints} 積分</span></p>
-                                <button onClick={() => { setGameState('ended'); setShowWinScreen(false); }} className="w-full py-4 bg-amber-600 text-white rounded-2xl font-black text-xl hover:bg-amber-700 shadow-lg active:scale-95 transition-all">收下獎勵</button>
-                            </div>
+                            <button onClick={downloadArchive} className="absolute bottom-2 right-2 opacity-5 hover:opacity-100 transition-opacity text-[8px] text-stone-400">ANALYZE DATA</button>
                         </div>
                     )}
 
-                    {showLossConfirm && (
-                        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-                        <div className="bg-white rounded-3xl p-8 max-w-xs w-full text-center shadow-2xl animate-fade-in border border-stone-200">
-                            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4"><AlertCircle size={40} /></div>
-                            <h2 className="text-xl font-bold text-stone-800 mb-2">天要亡我！</h2>
-                            <p className="text-sm text-stone-500 mb-6 font-bold">東方不敗果然厲害，積分扣除 {opponent.losePoints} 分。</p>
-                            <button onClick={() => { setGameState('ended'); if(soundOn) playSound('lose'); updateScore(false); setShowLossConfirm(false); }} className="w-full py-3 bg-stone-800 text-white rounded-xl font-bold shadow-lg active:scale-95">關閉並結算</button>
-                        </div>
-                        </div>
-                    )}
-
-                    {showTimeoutWarning && gameState === 'playing' && (
-                        <div className="absolute top-24 z-50 left-1/2 -translate-x-1/2 bg-yellow-400 text-stone-900 px-6 py-2 rounded-full shadow-lg font-bold animate-pulse border-2 border-yellow-600 w-max text-xs p-2">
-                            <Clock size={14} />快出手！否則敗局
-                        </div>
-                    )}
-                    
-                    <div className="bg-white p-3 shadow-sm z-20 border-b border-stone-100">
-                        <div className="h-6 flex justify-center items-center w-full mb-1">
-                            {chatMessage && (
-                                <div className="bg-red-50 border border-red-200 text-red-900 px-4 py-1 rounded-full shadow-sm text-xs font-bold flex items-center gap-1.5 whitespace-nowrap animate-fade-in">
-                                    <MessageCircle size={14} className="text-red-500"/>
-                                    <span>東方不敗：{chatMessage}</span>
+                    {(gameState === 'playing' || gameState === 'ended') && (
+                        <div className="w-[95vw] max-w-md flex flex-col h-[95vh] rounded bg-white relative shadow-2xl overflow-hidden">
+                            {showWinScreen && (
+                                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                                    <div className="bg-white rounded-xl p-8 max-w-xs w-full text-center shadow-2xl border border-stone-200">
+                                        <h2 className="text-3xl font-black text-stone-900 mb-6">{winMessage.title}</h2>
+                                        {/* 結算字體巨大化 */}
+                                        <div className="text-6xl font-black text-red-600 mb-8 border-4 border-red-500 p-4 rounded bg-red-50 leading-tight drop-shadow-lg">{winMessage.detail}</div>
+                                        <div className="text-4xl font-black text-stone-900 mb-8">{winMessage.points} 積分</div>
+                                        <button onClick={() => setShowWinScreen(false)} className="w-full py-4 bg-stone-900 text-white rounded-lg font-black text-xl active:scale-95">關閉並存檔</button>
+                                    </div>
                                 </div>
                             )}
-                        </div>
 
-                        <div className="flex justify-between items-center mb-1">
-                        <div className="flex items-center gap-3 relative w-full">
-                            <div className={`w-12 h-12 rounded-full flex items-center justify-center text-4xl border-2 ${turn !== userColor ? 'border-red-600 bg-red-50 ring-2 ring-red-200' : 'border-stone-200'}`}>{opponent.avatar}</div>
-                            <div className="flex-1">
-                            <div className="flex items-baseline gap-2">
-                                <div className="font-bold text-lg text-stone-800 leading-tight">{opponent.name}</div>
-                                {userColor && (
-                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border shadow-sm ${userColor === 'red' ? 'text-stone-800 border-stone-200 bg-stone-100' : 'text-red-600 border-red-200 bg-red-50'}`}>
-                                        {userColor === 'red' ? '持黑' : '持紅'}
-                                    </span>
-                                )}
-                            </div>
-                            <div className="text-[10px] text-stone-500 font-bold">{opponent.level}</div>
-                            </div>
-                            <button onClick={() => setSoundOn(!soundOn)} className="text-stone-400 p-2 ml-auto">{soundOn ? <Volume2 size={20} /> : <VolumeX size={20} />}</button>
-                        </div>
-                        </div>
-                        <div className={`w-full text-center py-1 rounded bg-stone-50 border border-stone-200 font-black text-sm ${turn === userColor ? 'text-green-600' : 'text-red-600'} mb-1`}>{turn === userColor ? "請您落子" : "葵花神功運算中..."}</div>
-                        
-                        {tacticAlert && (
-                            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[60] text-center pointer-events-none">
-                                <div className="bg-gradient-to-r from-red-600 to-stone-900 text-white px-6 py-3 rounded-full shadow-2xl border-4 border-red-200 flex items-center gap-2" style={{animation: 'zoom-in-bounce 0.5s forwards'}}>
-                                    <Zap size={24} className="text-yellow-400 fill-current" />
-                                    <span className="text-2xl font-black italic tracking-widest">{tacticAlert}</span>
+                            {showTimeoutWarning && gameState === 'playing' && (
+                                <div className="absolute top-24 z-50 left-1/2 -translate-x-1/2 bg-red-600 text-white px-6 py-2 rounded-full shadow-lg font-bold animate-pulse border-2 border-red-900 w-max text-xs">
+                                    <Clock size={14} className="inline mr-1" />時間內未下棋，則敗局
+                                </div>
+                            )}
+
+                            <div className="bg-white p-3 z-20 border-b border-stone-200 flex-shrink-0">
+                                <div className="flex justify-between items-center mb-2">
+                                    <div className="flex items-center gap-3 w-full">
+                                        <div className={`w-12 h-12 rounded flex items-center justify-center text-4xl border-2 ${turn !== userColor ? 'border-black bg-stone-50' : 'border-transparent'}`}>👺</div>
+                                        <div className="flex-1 font-bold text-lg text-stone-900 flex items-center gap-2">
+                                            東方不敗
+                                            {userColor && <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${userColor === 'red' ? 'text-stone-800 border-stone-300 bg-stone-100' : 'text-red-700 border-red-300 bg-red-50'}`}>{userColor === 'red' ? '持黑' : '持紅'}</span>}
+                                        </div>
+                                        <button onClick={() => setSoundOn(!soundOn)} className="text-stone-400 p-2 ml-auto">{soundOn ? <Volume2 size={20} /> : <VolumeX size={20} />}</button>
+                                    </div>
+                                </div>
+                                <div className={`w-full text-center py-1 rounded font-black text-sm ${turn === userColor ? 'text-green-700' : 'text-stone-600'}`}>{turn === userColor ? "請您落子" : "對方思考中..."}</div>
+                                <div className="bg-stone-50 rounded px-2 py-1 text-[10px] leading-tight flex flex-wrap gap-x-1 items-start min-h-[1.2rem] mt-2 border border-stone-200">
+                                    <span className="text-stone-500 font-bold whitespace-nowrap">對方吃子:</span>
+                                    <span className="flex gap-x-1 font-bold flex-wrap">{userColor && graveyard[userColor]?.map((p, i) => <span key={i} className={p.color === 'red' ? 'text-red-700' : 'text-stone-900'}>{p.name}</span>)}</span>
                                 </div>
                             </div>
-                        )}
-                        
-                        <div className="bg-stone-50 rounded px-2 py-1 text-[10px] leading-tight flex flex-wrap gap-x-1 items-start min-h-[1.2rem]">
-                            <span className="text-stone-500 font-bold whitespace-nowrap">對方吃子:</span>
-                            <span className="flex gap-x-1 font-bold flex-wrap">
-                                {userColor && graveyard[userColor]?.map((p, i) => <span key={i} className={p.color === 'red' ? 'text-red-700' : 'text-black'}>{p.name}</span>)}
-                            </span>
-                        </div>
-                    </div>
 
-                    <div className="flex-1 bg-[#f0f0f0] flex items-center justify-center p-2 relative overflow-hidden">
-                        <div className="relative w-full aspect-[1/2] max-h-full bg-white border-2 border-stone-400 shadow-inner rounded-md p-1">
-                        <div className="absolute inset-0 grid grid-cols-4 grid-rows-8 gap-[1px] bg-stone-200 border border-stone-400 pointer-events-none">
-                            {Array(32).fill(0).map((_, i) => <div key={i} className="bg-white/50"></div>)}
-                        </div>
-                        
-                        {board.map((piece, idx) => {
-                            const isSelected = idx === selectedIdx;
-                            const pos = getPos(idx);
-                            return (
-                            <div key={idx} onClick={() => handleCellClick(idx)} className="absolute w-[25%] h-[12.5%] flex items-center justify-center" style={{ top: pos.top, left: pos.left, opacity: animatingPiece?.fromIdx === idx ? 0 : 1 }}>
-                                <div className={`w-[33%] aspect-square rounded-full flex items-center justify-center shadow-lg cursor-pointer ${!piece?'invisible':''} ${isSelected?'ring-4 ring-yellow-400 z-10 scale-110':''} ${piece?.hidden?'bg-gradient-to-br from-emerald-800 to-stone-900 border-b-2 border-black':'bg-stone-50 border-b-2 border-stone-300'}`}>
-                                {piece && !piece.hidden && (
-                                    <div className={`w-full h-full rounded-full flex items-center justify-center ${piece.color==='red'?'text-red-700':'text-zinc-900'} border border-stone-200`}>
-                                    <span className="font-serif text-2xl font-black leading-none translate-y-[-1px] drop-shadow-sm">{piece.name}</span>
+                            <div className="flex-1 bg-stone-100 flex items-center justify-center p-3 relative min-h-0 overflow-hidden">
+                                <div className="game-board relative bg-white shadow-md mx-auto" style={{ width: '100%', maxHeight: '100%', aspectRatio: '1/2' }}>
+                                    <div className="absolute inset-0 grid grid-cols-4 grid-rows-8 pointer-events-none">{Array(32).fill(0).map((_, i) => <div key={i} className="game-cell" style={{ border: '2px solid black' }}></div>)}</div>
+                                    {board.map((p, idx) => {
+                                        const pos = getPosFE(idx);
+                                        return (
+                                            <div key={idx} onClick={() => handleCellClick(idx)} className={`absolute w-[25%] h-[12.5%] flex items-center justify-center transition-opacity ${animatingPiece?.from === idx ? 'opacity-0' : 'opacity-100'}`} style={{ top: pos.top, left: pos.left }}>
+                                                <div className={`w-[45%] aspect-square rounded-full flex items-center justify-center shadow-sm cursor-pointer ${!p?'invisible':''} ${idx === selectedIdx ? 'ring-4 ring-yellow-400 z-10 scale-110' : ''} ${p?.hidden?'bg-green-200 border-2 border-green-400':'bg-stone-50 border-2 border-stone-300'}`}>
+                                                    {p && !p.hidden && <span className={`font-serif text-2xl font-black ${p.color==='red'?'text-red-700':'text-stone-900'}`}>{p.name}</span>}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                    {animatingPiece && (
+                                        <div className="absolute w-[25%] h-[12.5%] flex items-center justify-center z-50 transition-all duration-100 ease-in-out" style={{ top: getPosFE(animatingPiece.to).top, left: getPosFE(animatingPiece.to).left }}>
+                                            <div className={`w-[45%] aspect-square rounded-full flex items-center justify-center shadow-xl bg-stone-50 border-2 border-stone-300 scale-110`}>
+                                                <span className={`font-serif text-2xl font-black ${animatingPiece.piece.color === 'red' ? 'text-red-700' : 'text-stone-900'}`}>{animatingPiece.piece.name}</span>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="bg-white p-3 z-20 border-t border-stone-200 flex-shrink-0">
+                                <div className="bg-stone-50 rounded px-2 py-1 text-[10px] leading-tight flex flex-wrap gap-x-1 items-start min-h-[1.2rem] mb-3 border border-stone-200">
+                                    <span className="text-stone-500 font-bold whitespace-nowrap">我方吃子:</span>
+                                    <span className="flex gap-x-1 font-bold flex-wrap">{userColor && graveyard[userColor==='red'?'black':'red']?.map((p, i) => <span key={i} className={p.color === 'red' ? 'text-red-700' : 'text-stone-900'}>{p.name}</span>)}</span>
+                                </div>
+                                {gameState === 'ended' ? (
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <button onClick={initGame} className="py-3 bg-red-700 text-white rounded font-black active:scale-95 shadow-md flex items-center justify-center gap-2"><RefreshCw size={20}/> 再戰一局</button>
+                                        <button onClick={() => setGameState('lobby')} className="py-3 bg-stone-800 text-white rounded font-black active:scale-95 shadow-md flex items-center justify-center gap-2">回到大廳</button>
+                                    </div>
+                                ) : (
+                                    <div className="flex justify-between items-center">
+                                        <div className="flex items-center gap-3">
+                                            <div className={`w-12 h-12 rounded flex items-center justify-center text-3xl border-2 border-black bg-stone-50`}>👨</div>
+                                            <div>
+                                                <div className="flex items-baseline gap-2">
+                                                    <div className="font-bold text-lg text-stone-900 leading-tight">林大爺</div>
+                                                    {userColor && <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${userColor === 'red' ? 'text-red-700 border-red-300 bg-red-50' : 'text-stone-800 border-stone-300 bg-stone-100'}`}>{userColor === 'red' ? '持紅' : '持黑'}</span>}
+                                                </div>
+                                                <div className={`flex items-center gap-2 text-xs font-black ${playerTimeLeft <= 20 ? 'text-red-600' : 'text-amber-700'}`}>
+                                                    <Trophy size={12} />{playerScore} <span className={`font-mono ml-2 ${playerTimeLeft <= 20 ? 'text-red-600 animate-pulse' : 'text-stone-400'}`}>{playerTimeLeft}s</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <button onClick={handleSurrender} className="flex flex-col items-center justify-center w-14 h-12 bg-white rounded border border-stone-200 text-stone-400 hover:text-red-600 transition-all active:scale-95"><Flag size={18} /><span className="text-[10px] font-bold mt-0.5">認輸</span></button>
                                     </div>
                                 )}
-                                </div>
                             </div>
-                            );
-                        })}
-                        {animatingPiece && (
-                            <div className="absolute w-[25%] h-[12.5%] flex items-center justify-center z-50 transition-all duration-300" style={{ top: getPos(animatingPiece.toIdx).top, left: getPos(animatingPiece.toIdx).left }}>
-                            <div className={`w-[33%] aspect-square rounded-full flex items-center justify-center shadow-2xl bg-white border-b-2 border-stone-300 scale-125 ${animatingPiece.piece.color === 'red' ? 'text-red-700' : 'text-zinc-900'}`}>
-                                <span className="font-serif text-2xl font-black">{animatingPiece.piece.name}</span>
-                            </div>
-                            </div>
-                        )}
                         </div>
-                    </div>
-
-                    <div className="bg-white p-4 shadow-[0_-5px_15px_rgba(0,0,0,0.1)] z-20">
-                        <div className="bg-stone-50 rounded px-2 py-1 text-[10px] leading-tight flex flex-wrap gap-x-1 items-start min-h-[1.2rem] mb-2">
-                            <span className="text-stone-500 font-bold whitespace-nowrap">我方吃子:</span>
-                            <span className="flex gap-x-1 font-bold flex-wrap">
-                                {userColor && graveyard[userColor==='red'?'black':'red']?.map((p, i) => <span key={i} className={p.color === 'red' ? 'text-red-700' : 'text-black'}>{p.name}</span>)}
-                            </span>
-                        </div>
-                        {gameState === 'ended' ? (
-                        <div className="grid grid-cols-2 gap-3">
-                            <button onClick={initGame} className="py-3 bg-red-600 text-white rounded-xl font-black flex items-center justify-center gap-2 transition-all active:scale-95 shadow-md"><RefreshCw size={20}/> 再戰神功</button>
-                            <button onClick={() => setGameState('lobby')} className="py-3 bg-stone-800 text-white rounded-xl font-black flex items-center justify-center gap-2 transition-all active:scale-95 shadow-md">回到主選單</button>
-                        </div>
-                        ) : (
-                        <div className="flex justify-between items-center">
-                            <div className="flex items-center gap-3">
-                            <div className={`w-12 h-12 rounded-full flex items-center justify-center text-3xl border-2 ${turn === userColor ? 'border-green-500 bg-green-50 ring-2 ring-green-200' : 'border-stone-200'}`}>{playerAvatar}</div>
-                            <div>
-                                <div className="flex items-baseline gap-2">
-                                <div className="font-bold text-lg text-stone-800 leading-tight">{playerName}</div>
-                                {userColor && (
-                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border shadow-sm ${userColor === 'red' ? 'text-red-600 border-red-200 bg-red-50' : 'text-stone-800 border-stone-200 bg-stone-100'}`}>
-                                        {userColor === 'red' ? '持紅' : '持黑'}
-                                    </span>
-                                )}
-                                </div>
-                                <div className="flex items-center gap-2 text-xs text-amber-600 font-black"><Trophy size={12} />{playerScore}<div className="flex items-center gap-1 text-stone-400 font-mono ml-2"><Clock size={10} />{playerTimeLeft}s</div></div>
-                            </div>
-                            </div>
-                            <button onClick={() => setShowLossConfirm(true)} className="flex flex-col items-center justify-center w-14 h-12 bg-stone-50 rounded-lg border border-stone-200 text-stone-400 hover:text-red-500 transition-all active:scale-95"><Flag size={18} /><span className="text-[10px] font-bold">認輸</span></button>
-                        </div>
-                        )}
-                    </div>
-                    </div>
-                )}
+                    )}
                 </div>
             );
         }
